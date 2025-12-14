@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Ably Chat + Video</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { --bg:#0f0f12; --panel:#17171b; --text:#e8e8ea; --muted:#9aa0a6; --prime:#4f8cff; }
+    html, body { height:100%; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; color:var(--text); background:var(--bg);
+           display:grid; grid-template-rows:56px 1fr; }
+    header { display:flex; align-items:center; gap:12px; padding:8px 12px; background:var(--panel); border-bottom:1px solid #26262b; }
+    header img { width:32px; height:32px; border-radius:50%; object-fit:cover; }
+    header .spacer { margin-left:auto; display:flex; gap:8px; }
+    main { display:grid; grid-template-columns:280px 1fr; height:calc(100vh - 56px); }
+    aside { border-right:1px solid #26262b; padding:12px; overflow:auto; background:#121216; }
+    aside h3 { margin:6px 0 10px; font-size:14px; color:var(--muted); }
+    aside .room { padding:8px; border-radius:8px; cursor:pointer; margin-bottom:6px; background:#151519; }
+    aside .room.active { background:#1b1f2a; border:1px solid #2b3350; }
+    section { display:grid; grid-template-rows: 1fr auto; }
+    #messages { padding:12px; overflow:auto; }
+    .msg { margin-bottom:10px; }
+    .meta { font-size:12px; color:var(--muted); display:flex; align-items:center; gap:6px; }
+    .bubble { background:#191b22; padding:8px 10px; border-radius:10px; margin-top:4px; max-width:70ch; word-wrap:break-word; }
+    #composer { display:flex; gap:8px; padding:12px; border-top:1px solid #26262b; background:#121216; }
+    input[type="text"], input[type="url"] { flex:1; padding:10px; border-radius:8px; border:1px solid #2b2f3a; background:#0e0f13; color:var(--text); }
+    button { padding:8px 12px; border-radius:8px; border:1px solid #32415f; background:#1a2440; color:#cfe0ff; cursor:pointer; }
+    button.secondary { border-color:#3a3a45; background:#202026; color:#d8d8db; }
+    #videoPanel { position:fixed; bottom:12px; right:12px; background:#0c0c10; border:1px solid #2a2a32; border-radius:10px; padding:8px; display:none; }
+    video { width:240px; height:180px; background:#000; border-radius:8px; display:block; margin-bottom:6px; }
+    .row { display:flex; gap:8px; align-items:center; }
+    .small { font-size:12px; color:var(--muted); }
+    .pill { padding:2px 8px; border:1px solid #3a3f4a; border-radius:999px; }
+    .presence { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  </style>
+</head>
+<body>
+  <header>
+    <img id="avatar" src="" alt="avatar">
+    <strong id="username">Guest</strong>
+    <span class="small" id="clientId"></span>
+    <div class="spacer">
+      <button id="editProfile" class="secondary">Edit profile</button>
+      <button id="newRoom">+ New private room</button>
+      <button id="startVideo">Start video</button>
+      <button id="endVideo" class="secondary">End video</button>
+    </div>
+  </header>
+  <main>
+    <aside>
+      <h3>Rooms</h3>
+      <div id="rooms"></div>
+      <div class="row" style="margin-top:8px;">
+        <input id="joinRoomId" type="text" placeholder="Join room ID or link..." />
+        <button id="joinRoomBtn" class="secondary">Join</button>
+      </div>
+      <div style="margin-top:12px;">
+        <div class="small">Presence</div>
+        <div id="presence" class="presence"></div>
+      </div>
+    </aside>
+    <section>
+      <div id="messages"></div>
+      <div id="composer">
+        <input id="messageInput" type="text" placeholder="Type a message..." />
+        <button id="sendBtn">Send</button>
+      </div>
+    </section>
+  </main>
+
+  <div id="videoPanel">
+    <video id="localVideo" autoplay muted playsinline></video>
+    <video id="remoteVideo" autoplay playsinline></video>
+    <div class="row">
+      <button id="muteBtn" class="secondary">Mute</button>
+      <button id="camBtn" class="secondary">Toggle camera</button>
+      <span class="small pill" id="callStatus">Idle</span>
+    </div>
+  </div>
+
+  <!-- Ably SDK -->
+  <script src="https://cdn.ably.io/lib/ably.min-1.js"></script>
+  <script>
+    // ===== CONFIG =====
+    const ABLY_API_KEY = 'LDnKDA.DtVPsw:PjiwB3ql-g2U5YLAnyWo4Gv4PF1rQXnNDSpX1ApUm40';
+    const DEFAULT_ROOM_ID = 'general';
+    const STUN_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+
+    // ===== STATE & UI =====
+    const state = {
+      ably: null,
+      channels: new Map(),
+      currentRoomId: DEFAULT_ROOM_ID,
+      username: '',
+      photoURL: '',
+      clientId: '',
+      pc: null,
+      localStream: null,
+      rtcChannel: null,
+      audioMuted: false,
+      videoOff: false
+    };
+
+    const el = {
+      username: document.getElementById('username'),
+      avatar: document.getElementById('avatar'),
+      clientId: document.getElementById('clientId'),
+      rooms: document.getElementById('rooms'),
+      presence: document.getElementById('presence'),
+      messages: document.getElementById('messages'),
+      input: document.getElementById('messageInput'),
+      send: document.getElementById('sendBtn'),
+      newRoom: document.getElementById('newRoom'),
+      joinRoomId: document.getElementById('joinRoomId'),
+      joinRoomBtn: document.getElementById('joinRoomBtn'),
+      editProfile: document.getElementById('editProfile'),
+      startVideo: document.getElementById('startVideo'),
+      endVideo: document.getElementById('endVideo'),
+      videoPanel: document.getElementById('videoPanel'),
+      localVideo: document.getElementById('localVideo'),
+      remoteVideo: document.getElementById('remoteVideo'),
+      muteBtn: document.getElementById('muteBtn'),
+      camBtn: document.getElementById('camBtn'),
+      callStatus: document.getElementById('callStatus'),
+    };
+
+    // ===== INIT PROFILE =====
+    function initProfile() {
+      const saved = JSON.parse(localStorage.getItem('profile') || '{}');
+      state.username = saved.username || prompt('Choose a username:') || 'Guest';
+      state.photoURL = saved.photoURL || '';
+      state.clientId = saved.clientId || ('u_' + Math.random().toString(36).slice(2, 10));
+      localStorage.setItem('profile', JSON.stringify({
+        username: state.username,
+        photoURL: state.photoURL,
+        clientId: state.clientId
+      }));
+      el.username.textContent = state.username;
+      el.clientId.textContent = `(${state.clientId})`;
+      el.avatar.src = state.photoURL || 'data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="%23222"/><text x="16" y="22" text-anchor="middle" font-size="14" fill="white">🙂</text></svg>';
+    }
+
+    // ===== ABLY SETUP =====
+    async function initAbly() {
+      state.ably = new Ably.Realtime({ key: ABLY_API_KEY, clientId: state.clientId });
+      await new Promise(resolve => state.ably.connection.once('connected', resolve));
+      renderRooms([DEFAULT_ROOM_ID]);
+      await switchRoom(DEFAULT_ROOM_ID);
+    }
+
+    // ===== ROOMS & PRESENCE =====
+    function getChannel(name) {
+      if (!state.channels.has(name)) {
+        const ch = state.ably.channels.get(name);
+        state.channels.set(name, ch);
+      }
+      return state.channels.get(name);
+    }
+
+    async function switchRoom(roomId) {
+      state.currentRoomId = roomId;
+      state.channels.forEach((ch, name) => {
+        if (name.startsWith('chat:') || name.startsWith('rtc:')) ch.unsubscribe();
+      });
+
+      el.messages.innerHTML = '';
+      renderRoomListActive(roomId);
+
+      const chatCh = getChannel('chat:' + roomId);
+      await chatCh.presence.enter({ username: state.username, photoURL: state.photoURL });
+      updatePresence(roomId);
+      chatCh.presence.subscribe(() => updatePresence(roomId));
+
+      chatCh.subscribe('chat', msg => {
+        const { text, user, ts } = msg.data;
+        addMessage(user, text, ts);
+      });
+
+      state.rtcChannel = getChannel('rtc:' + roomId);
+      state.rtcChannel.subscribe('offer', async msg => {
+        if (msg.clientId === state.clientId) return;
+        await ensurePeerConnection();
+        await state.pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+        const answer = await state.pc.createAnswer();
+        await state.pc.setLocalDescription(answer);
+        state.rtcChannel.publish('answer', answer);
+        el.callStatus.textContent = 'Answering call…';
+      });
+
+      state.rtcChannel.subscribe('answer', async msg => {
+        if (msg.clientId === state.clientId) return;
+        if (!state.pc) return;
+        if (!state.pc.currentRemoteDescription) {
+          await state.pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+          el.callStatus.textContent = 'Connected';
+        }
+      });
+
+      state.rtcChannel.subscribe('ice', async msg => {
+        if (msg.clientId === state.clientId) return;
+        if (!state.pc) return;
+        try {
+          await state.pc.addIceCandidate(new RTCIceCandidate(msg.data));
+        } catch (e) {
+          console.warn('ICE add failed', e);
+        }
+      });
+    }
+
+    function renderRooms(roomIds) {
+      el.rooms.innerHTML = '';
+      roomIds.forEach(id => {
+        const div = document.createElement('div');
+        div.className = 'room';
+        div.textContent = id === DEFAULT_ROOM_ID ? 'General' : `Room: ${id}`;
+        div.onclick = () => switchRoom(id);
+        if (id === state.currentRoomId) div.classList.add('active');
+        el.rooms.appendChild(div);
+      });
+    }
+
+    function renderRoomListActive(roomId) {
+      Array.from(el.rooms.children).forEach(node => {
+        node.classList.toggle('active', node.textContent.includes(roomId) || (roomId === DEFAULT_ROOM_ID && node.textContent === 'General'));
+      });
+    }
+
+    async function updatePresence(roomId) {
+      const ch = getChannel('chat:' + roomId);
+      const members = await ch.presence.get();
+      el.presence.innerHTML = '';
+      members.forEach(m => {
+        const pill = document.createElement('span');
+        pill.className = 'pill small';
+        const name = m.data?.username || m.clientId;
+        pill.textContent = `${name}`;
+        el.presence.appendChild(pill);
+      });
+    }
+
+    // ===== MESSAGES =====
+    function addMessage(user, text, ts) {
+      const wrap = document.createElement('div');
+      wrap.className = 'msg';
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const avatar = document.createElement('img');
+      avatar.src = user.photoURL || '';
+      avatar.style.width = '18px'; avatar.style.height = '18px'; avatar.style.borderRadius = '50%';
+      avatar.onerror = () => avatar.style.display = 'none';
+      const name = document.createElement('strong');
+      name.textContent = user.username || 'Unknown';
+      const time = document.createElement('span');
+      time.textContent = new Date(ts || Date.now()).toLocaleTimeString();
+      meta.appendChild(avatar); meta.appendChild(name); meta.append(' — ', time);
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.textContent = text;
+      wrap.appendChild(meta); wrap.appendChild(bubble);
+      el.messages.appendChild(wrap);
+      el.messages.scrollTop = el.messages.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const text = (el.input.value || '').trim();
+      if (!text) return;
+      const ch = getChannel('chat:' + state.currentRoomId);
+      ch.publish('chat', { text, user: { username: state.username, photoURL: state.photoURL }, ts: Date.now() });
+      el.input.value = '';
+    }
+
+    // ===== VIDEO (WebRTC + Ably signaling) =====
+    async function ensurePeerConnection() {
+      if (state.pc) return state.pc;
+      state.pc = new RTCPeerConnection({ iceServers: STUN_SERVERS });
+      state.pc.onicecandidate = ev => {
+        if (ev.candidate) state.rtcChannel.publish('ice', ev.candidate.toJSON());
+      };
+      state.pc.ontrack = ev => {
+        el.remoteVideo.srcObject = ev.streams[0];
+        el.callStatus.textContent = 'Receiving video';
+      };
+      if (state.localStream) {
+        state.localStream.getTracks().forEach(t => state.pc.addTrack(t, state.localStream));
+      }
+      return state.pc;
+    }
+
+    async function startVideo() {
+      el.videoPanel.style.display = 'block';
+      state.localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      el.localVideo.srcObject = state.localStream;
+      state.audioMuted = false; state.videoOff = false;
+      el.callStatus.textContent = 'Camera on';
+
+      await ensurePeerConnection();
+      const senders = state.pc.getSenders();
+      const haveTracks = senders && senders.length > 0;
+      if (!haveTracks) state.localStream.getTracks().forEach(t => state.pc.addTrack(t, state.localStream));
+
+      const offer = await state.pc.createOffer();
+      await state.pc.setLocalDescription(offer);
+      state.rtcChannel.publish('offer', offer);
+      el.callStatus.textContent = 'Calling…';
+    }
+
+    async function endVideo() {
+      el.videoPanel.style.display = 'none';
+      el.callStatus.textContent = 'Idle';
+      if (state.pc) {
+        try { state.pc.close(); } catch {}
+        state.pc = null;
+      }
+      if (state.localStream) {
+        state.localStream.getTracks().forEach(t => t.stop());
+        state.localStream = null;
+      }
+      el.localVideo.srcObject = null;
+      el.remoteVideo.srcObject = null;
+    }
+
+    function toggleMute() {
+      if (!state.localStream) return;
+      state.audioMuted = !state.audioMuted;
+      state.localStream.getAudioTracks().forEach(t => t.enabled = !state.audioMuted);
+      el.muteBtn.textContent = state.audioMuted ? 'Unmute' : 'Mute';
+    }
+
+    function toggleCamera() {
+      if (!state.localStream) return;
+      state.videoOff = !state.videoOff;
+      state.localStream.getVideoTracks().forEach(t => t.enabled = !state.videoOff);
+      el.camBtn.textContent = state.videoOff ? 'Camera on' : 'Toggle camera';
+    }
+
+    // ===== PRIVATE ROOMS =====
+    function createNewRoom() {
+      const id = prompt('Private room ID (letters/numbers):', Math.random().toString(36).slice(2, 8));
+      if (!id) return;
+      addRoomToList(id);
+      switchRoom(id);
+      history.replaceState(null, '', `#room=${encodeURIComponent(id)}`);
+    }
+
+    function addRoomToList(id) {
+      for (const node of Array.from(el.rooms.children)) {
+        if (node.textContent.endsWith(id)) return;
+      }
+      const div = document.createElement('div');
+      div.className = 'room';
+      div.textContent = `Room: ${id}`;
+      div.onclick = () => switchRoom(id);
+      el.rooms.appendChild(div);
+    }
+
+    function parseJoinInput(v) {
+      if (!v) return null;
+      try {
+        const url = new URL(v, window.location.origin);
+        const roomFromHash = url.hash.startsWith('#room=') ? decodeURIComponent(url.hash.slice(6)) : null;
+        return roomFromHash || v.trim();
+      } catch {
+        return v.trim();
+      }
+    }
+
+    // ===== EVENT WIRING =====
+    el.send.onclick = sendMessage;
+    el.input.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMessage(); });
+    el.newRoom.onclick = createNewRoom;
+    el.joinRoomBtn.onclick = () => {
+      const id = parseJoinInput(el.joinRoomId.value);
+      if (!id) return;
+      addRoomToList(id);
+      switchRoom(id);
+      history.replaceState(null, '', `#room=${encodeURIComponent(id)}`);
+      el.joinRoomId.value = '';
+    };
+    el.editProfile.onclick = () => {
+      const newName = prompt('New username:', state.username);
+      if (newName && newName !== state.username) {
+        state.username = newName;
+        localStorage.setItem('profile', JSON.stringify({ username: state.username, photoURL: state.photoURL, clientId: state.clientId }));
+        el.username.textContent = state.username;
+        const ch = getChannel('chat:' + state.currentRoomId);
+        ch.presence.enter({ username: state.username, photoURL: state.photoURL });
+        updatePresence(state.currentRoomId);
+      }
+      const newPhoto = prompt('Avatar image URL (optional):', state.photoURL || '');
+      if (newPhoto !== null) {
+        state.photoURL = newPhoto.trim();
+        localStorage.setItem('profile', JSON.stringify({ username: state.username, photoURL: state.photoURL, clientId: state.clientId }));
+        el.avatar.src = state.photoURL || el.avatar.src;
+      }
+    };
+    el.startVideo.onclick = startVideo;
+    el.endVideo.onclick = endVideo;
+    el.muteBtn.onclick = toggleMute;
+    el.camBtn.onclick = toggleCamera;
+
+    // ===== BOOT =====
+    (async function boot() {
+      initProfile();
+      const h = location.hash;
+      if (h.startsWith('#room=')) {
+        state.currentRoomId = decodeURIComponent(h.slice(6));
+      }
+      await initAbly();
+    })();
+  </script>
+</body>
+</html>
