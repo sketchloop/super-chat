@@ -108,7 +108,7 @@
 
     async function switchRoom(roomId) {
       state.currentRoomId = roomId;
-      const chatCh = getChannel('chat:'+roomId);
+      const chatCh = getChannel('chat'+roomId); // channel names like "chatgeneral", "chatroom123"
       el.messages.innerHTML = '';
 
       // Load history
@@ -127,7 +127,7 @@
       });
 
       // Video signaling channel
-      state.rtcChannel = getChannel('rtc:'+roomId);
+      state.rtcChannel = getChannel('rtc'+roomId);
       state.rtcChannel.subscribe('offer', async msg => {
         if (msg.clientId===state.clientId) return;
         await ensurePeerConnection();
@@ -162,6 +162,4 @@
     function addMessage(user,text,ts) {
       const wrap=document.createElement('div'); wrap.className='msg';
       const meta=document.createElement('div'); meta.className='meta';
-      meta.textContent=(user.username||'Unknown')+' — '+new Date(ts||Date.now()).toLocaleTimeString();
-      const bubble=document.createElement('div'); bubble.className='bubble'; bubble.textContent=text;
-      wrap.appendChild(meta); wrap.appendChild(b
+      meta.textContent=(user.username||'Unknown')+' — '+new Date(ts
